@@ -3,6 +3,13 @@
 
 This project implements Container Storage Interface (CSI) plugin that allows using [rclone mount](https://rclone.org/) as storage backend. Rclone mount points and [parameters](https://rclone.org/commands/rclone_mount/) can be configured using Secret or PersistentVolume volumeAttibutes. 
 
+## Forked modification
+I add the support for Staging mount path, allowing to only mount once each PV on
+node, and a bind mount is done between global mount and container.
+It's not really tested for now so... take care !
+
+You must use that if you want to mount your PVC multiple time on a node and use VFS.
+
 ## Kubernetes cluster compatability
 Works (tested):
 - `deploy/kubernetes/1.19`: K8S>= 1.19.x (due to storage.k8s.io/v1 CSIDriver API)

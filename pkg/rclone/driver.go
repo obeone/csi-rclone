@@ -7,12 +7,10 @@ import (
 )
 
 type driver struct {
-	csiDriver *csicommon.CSIDriver
-	endpoint  string
+	csiDriver        *csicommon.CSIDriver
+	endpoint         string
 
 	ns    *nodeServer
-	cap   []*csi.VolumeCapability_AccessMode
-	cscap []*csi.ControllerServiceCapability
 }
 
 var (
@@ -30,6 +28,9 @@ func NewDriver(nodeID, endpoint string) *driver {
 	d.csiDriver = csicommon.NewCSIDriver(DriverName, DriverVersion, nodeID)
 	d.csiDriver.AddVolumeCapabilityAccessModes([]csi.VolumeCapability_AccessMode_Mode{csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER})
 	d.csiDriver.AddControllerServiceCapabilities([]csi.ControllerServiceCapability_RPC_Type{csi.ControllerServiceCapability_RPC_UNKNOWN})
+
+	d.ns = &nodeServer{DefaultNodeServer: csicommon.NewDefaultNodeServer(d.csiDriver)}
+	
 
 	return d
 }

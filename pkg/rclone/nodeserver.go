@@ -27,17 +27,15 @@ type nodeServer struct {
 	mounter *mount.SafeFormatAndMount
 }
 
-type mountPoint struct {
-	VolumeId  string
-	MountPath string
-}
-
 func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	klog.Infof("NodePublishVolume: called with args %+v", *req)
 
 	targetPath := req.GetTargetPath()
+	sourcePath := req.GetStagingTargetPath()
 
-	notMnt, err := mount.New("").IsLikelyNotMountPoint(targetPath)
+	// Better IsNotMountPoint here than IsLikelyNotMountPoint because the second
+	// don't work well on bind
+	notMnt, err := mount.New("").IsNotMountPoint(targetPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if err := os.MkdirAll(targetPath, 0750); err != nil {
@@ -74,16 +72,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		mountOptions = append(mountOptions, "ro")
 	}
 
-	// Load default connection settings from secret
-	secret, e := getSecret("rclone-secret")
-
-	remote, remotePath, configData, flags, e := extractFlags(req.GetVolumeContext(), secret)
-	if e != nil {
-		klog.Warningf("storage parameter error: %s", e)
-		return nil, e
-	}
-
-	e = Mount(remote, remotePath, targetPath, configData, flags)
+	e := MountBind(sourcePath, targetPath, mountOptions)
 	if e != nil {
 		if os.IsPermission(e) {
 			return nil, status.Error(codes.PermissionDenied, e.Error())
@@ -155,7 +144,8 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 
 	m := mount.New("")
 
-	notMnt, err := m.IsLikelyNotMountPoint(targetPath)
+	// Same here, IsNotMounyPoint works better on bind
+	notMnt, err := m.IsNotMountPoint(targetPath)
 	if err != nil && !mount.IsCorruptedMnt(err) {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -180,12 +170,112 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 
 func (ns *nodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
 	klog.Infof("NodeUnstageVolume: called with args %+v", *req)
+
+	targetPath := req.GetStagingTargetPath()
+	if len(targetPath) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "NodeUnstageVolume Target Path must be provided")
+	}
+
+	m := mount.New("")
+
+	notMnt, err := m.IsLikelyNotMountPoint(targetPath)
+	if err != nil && !mount.IsCorruptedMnt(err) {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	if notMnt && !mount.IsCorruptedMnt(err) {
+		klog.Infof("Volume not mounted")
+
+	} else {
+		err = util.UnmountPath(req.GetStagingTargetPath(), m)
+		if err != nil {
+			klog.Infof("Error while unmounting path: %s", err)
+			// This will exit and fail the NodeUnpublishVolume making it to retry unmount on the next api schedule trigger.
+			// Since we mount the volume with allow-non-empty now, we could skip this one too.
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+
+		klog.Infof("Volume %s unmounted successfully", req.VolumeId)
+	}
+
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }
 
 func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
 	klog.Infof("NodeStageVolume: called with args %+v", *req)
+
+	targetPath := req.GetStagingTargetPath()
+
+	notMnt, err := mount.New("").IsLikelyNotMountPoint(targetPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if err := os.MkdirAll(targetPath, 0750); err != nil {
+				return nil, status.Error(codes.Internal, err.Error())
+			}
+			notMnt = true
+		} else {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+	}
+
+	if !notMnt {
+		// testing original mount point, make sure the mount link is valid
+		if _, err := ioutil.ReadDir(targetPath); err == nil {
+			klog.Infof("already mounted to target %s", targetPath)
+			return &csi.NodeStageVolumeResponse{}, nil
+		}
+		// todo: mount link is invalid, now unmount and remount later (built-in functionality)
+		klog.Warningf("ReadDir %s failed with %v, unmount this directory", targetPath, err)
+
+		ns.mounter = &mount.SafeFormatAndMount{
+			Interface: mount.New(""),
+			Exec:      mount.NewOsExec(),
+		}
+
+		if err := ns.mounter.Unmount(targetPath); err != nil {
+			klog.Errorf("Unmount directory %s failed with %v", targetPath, err)
+			return nil, err
+		}
+	}
+
+	// Unused...
+	//mountOptions := req.GetVolumeCapability().GetMount().GetMountFlags()
+
+	// Load default connection settings from secret
+	secret, _ := getSecret("rclone-secret")
+
+	remote, remotePath, configData, flags, e := extractFlags(req.GetVolumeContext(), secret)
+	if e != nil {
+		klog.Warningf("storage parameter error: %s", e)
+		return nil, e
+	}
+
+	e = Mount(remote, remotePath, targetPath, configData, flags)
+	if e != nil {
+		if os.IsPermission(e) {
+			return nil, status.Error(codes.PermissionDenied, e.Error())
+		}
+		if strings.Contains(e.Error(), "invalid argument") {
+			return nil, status.Error(codes.InvalidArgument, e.Error())
+		}
+		return nil, status.Error(codes.Internal, e.Error())
+	}
+
 	return &csi.NodeStageVolumeResponse{}, nil
+}
+
+func (ns *nodeServer) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
+	caps := []*csi.NodeServiceCapability{
+		{
+			Type: &csi.NodeServiceCapability_Rpc{
+				Rpc: &csi.NodeServiceCapability_RPC{
+					Type: csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME,
+				},
+			},
+		},
+	}
+
+	return &csi.NodeGetCapabilitiesResponse{Capabilities: caps}, nil
 }
 
 func validateFlags(flags map[string]string) error {
@@ -242,7 +332,7 @@ func Mount(remote string, remotePath string, targetPath string, configData strin
 
 	remoteWithPath := fmt.Sprintf(":%s:%s", remote, remotePath)
 
-	if strings.Contains(configData, "[" + remote + "]") {
+	if strings.Contains(configData, "["+remote+"]") {
 		remoteWithPath = fmt.Sprintf("%s:%s", remote, remotePath)
 		klog.Infof("remote %s found in configData, remoteWithPath set to %s", remote, remoteWithPath)
 	}
@@ -306,6 +396,38 @@ func Mount(remote string, remotePath string, targetPath string, configData strin
 	if err != nil {
 		return fmt.Errorf("mounting failed: %v cmd: '%s' remote: '%s' targetpath: %s output: %q",
 			err, mountCmd, remoteWithPath, targetPath, string(out))
+	}
+
+	return nil
+}
+
+// Mount bind between staging mount and target mount.
+func MountBind(stagePath string, targetPath string, mountOptions []string) error {
+	mountCmd := "mount"
+	mountArgs := []string{}
+
+	mountArgs = append(mountArgs, "--bind")
+	options := strings.Join(mountOptions, ",")
+
+	if len(options) > 0 {
+		mountArgs = append(mountArgs, "-o", options)
+	}
+	mountArgs = append(mountArgs, stagePath, targetPath)
+
+	// create target, os.Mkdirall is noop if it exists
+	err := os.MkdirAll(targetPath, 0750)
+	if err != nil {
+		return err
+	}
+
+	klog.Infof("executing mount command cmd=%s, stagepath=%s, targetpath=%s (args %s)", mountCmd, stagePath, targetPath, mountArgs)
+
+	out, err := exec.Command(mountCmd, mountArgs...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mounting failed: %v cmd: '%s' stagepath: '%s' targetpath: %s output: %q",
+			err, mountCmd, stagePath, targetPath, string(out))
+	} else {
+		klog.Info("Mount return : %s", out)
 	}
 
 	return nil
