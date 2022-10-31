@@ -427,7 +427,7 @@ func MountBind(stagePath string, targetPath string, mountOptions []string) error
 		return fmt.Errorf("mounting failed: %v cmd: '%s' stagepath: '%s' targetpath: %s output: %q",
 			err, mountCmd, stagePath, targetPath, string(out))
 	} else {
-		klog.Info("Mount return : %s", out)
+		klog.Info("Mount return : %s", string(out))
 	}
 
 	return nil
