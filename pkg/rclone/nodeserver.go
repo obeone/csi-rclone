@@ -250,7 +250,7 @@ func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 		return nil, e
 	}
 
-	e = Mount(remote, remotePath, targetPath, configData, flags)
+	e = Mount(remote, remotePath, targetPath, configData, flags, req.VolumeId)
 	if e != nil {
 		if os.IsPermission(e) {
 			return nil, status.Error(codes.PermissionDenied, e.Error())
@@ -318,7 +318,7 @@ func getSecret(secretName string) (*v1.Secret, error) {
 }
 
 // Mount routine.
-func Mount(remote string, remotePath string, targetPath string, configData string, flags map[string]string) error {
+func Mount(remote string, remotePath string, targetPath string, configData string, flags map[string]string, volumeId string) error {
 	mountCmd := "rclone"
 	mountArgs := []string{}
 
@@ -329,6 +329,7 @@ func Mount(remote string, remotePath string, targetPath string, configData strin
 	defaultFlags["vfs-cache-mode"] = "writes"
 	defaultFlags["allow-non-empty"] = "true"
 	defaultFlags["allow-other"] = "true"
+	defaultFlags["log-file"] = fmt.Sprintf("/var/log/rclone-%s.log", volumeId)
 
 	remoteWithPath := fmt.Sprintf(":%s:%s", remote, remotePath)
 
@@ -427,7 +428,7 @@ func MountBind(stagePath string, targetPath string, mountOptions []string) error
 		return fmt.Errorf("mounting failed: %v cmd: '%s' stagepath: '%s' targetpath: %s output: %q",
 			err, mountCmd, stagePath, targetPath, string(out))
 	} else {
-		klog.Info("Mount return : %s", string(out))
+		klog.Info("Mount return : %q", string(out))
 	}
 
 	return nil
