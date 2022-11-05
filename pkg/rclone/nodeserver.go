@@ -408,7 +408,6 @@ func MountBind(stagePath string, targetPath string, mountOptions []string) error
 	mountArgs := []string{}
 
 	mountArgs = append(mountArgs, "--bind")
-	mountArgs = append(mountArgs, "--daemon")
 	options := strings.Join(mountOptions, ",")
 
 	if len(options) > 0 {
